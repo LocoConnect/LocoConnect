@@ -107,18 +107,17 @@ S88Interface::S88Interface(const uint8_t &pinData, const uint8_t &pinClock, cons
     sei();
 }
 
-void S88Interface::initClass()
+void S88Interface::initClass() //bool initSecondArray = false
 {
     timing = S88TimingEnum::S88_PHASE_IDLE;    
 
-    s88DataValues = new byte[MAX_S88_REGISTERS];
     s88PendingReport = new byte[MAX_S88_REGISTERS];
+    s88DataValues = new byte[MAX_S88_REGISTERS];
+    s88ReportValues = new byte[MAX_S88_REGISTERS];
 
-    for (uint8_t i = 0; i < MAX_S88_REGISTERS; i++)
-    {
-        s88DataValues[i] = 0;
-        s88PendingReport[i] = 0;
-    }
+    memset(s88PendingReport, 0, MAX_S88_REGISTERS);
+    memset(s88DataValues, 0, MAX_S88_REGISTERS);
+    memset(s88ReportValues, 0, MAX_S88_REGISTERS);
 }
 
 uint8_t S88Interface::GetMaxModuleCount()
@@ -163,31 +162,22 @@ void S88Interface::UpdateBit(const uint8_t& pos, const uint8_t& readBitValue)
     uint8_t index = pos & 0x07;
     uint8_t arrayindex = pos >> 3;
 
-    uint8_t isPendingReport = bitRead(s88PendingReport[arrayindex], index);
-    uint8_t currentValue = bitRead(s88DataValues[arrayindex], index);
-
-    if (currentValue == 1 && isPendingReport == 1)
+    if (S88ActiveModules < arrayindex)
     {
-        //No update, report of high value is pending
+        uint8_t curVal = S88ActiveModules;
+        S88ActiveModules = arrayindex;
+        ReportAll(curVal);
     }
-    else if (readBitValue != currentValue)
-    {        
-        if (S88ActiveModules < arrayindex)
-        {
-            uint8_t curVal = S88ActiveModules;
-            S88ActiveModules = arrayindex;
-            ReportAll(curVal);
-        }
 
-        if (readBitValue == 0)
+    if (readBitValue != 0)
+    {
+        bool currentReportValue = bitRead(s88ReportValues[arrayindex], index);
+        if (currentReportValue != 1)
         {
-            bitClear(s88DataValues[arrayindex], index);
+            bitSet(s88PendingReport[arrayindex], index);
+            bitSet(s88ReportValues[arrayindex], index);
         }
-        else
-        {
-            bitSet(s88DataValues[arrayindex], index);
-        }
-        bitSet(s88PendingReport[arrayindex], index);
+        bitSet(s88DataValues[arrayindex], index);
     }
 }
 
@@ -328,6 +318,17 @@ void S88Interface::Process()
                 else if (timing == S88TimingEnum::S88_PHASE_DONE)
                 {
                     timing = S88TimingEnum::S88_PHASE_IDLE;
+                    if (updateReportValuesCounter == 0)
+                    {
+                        //Update report items, and clear data values and set update loop to LOOP_COUNT_BEFORE_CLEAR again.
+                        UpdateReportValues();
+                        memset(s88DataValues, 0, MAX_S88_REGISTERS);
+                        updateReportValuesCounter = LOOP_COUNT_BEFORE_CLEAR;
+                    }
+                    else
+                    {
+                        updateReportValuesCounter--;
+                    }
                     previousRefreshMillis = millis();
                 }
             }
@@ -337,6 +338,17 @@ void S88Interface::Process()
                     if(RefreshS88DataI2C()) //returns true if all devices have been checked;
                                             //returns false if more I2C device readings are pending
                     {
+                        if (updateReportValuesCounter == 0)
+                        {
+                            //Update report items, and clear data values and set update loop to LOOP_COUNT_BEFORE_CLEAR again.
+                            UpdateReportValues();
+                            memset(s88DataValues, 0, MAX_S88_REGISTERS);
+                            updateReportValuesCounter = LOOP_COUNT_BEFORE_CLEAR;
+                        }
+                        else
+                        {
+                            updateReportValuesCounter--;
+                        }
                         previousRefreshMillis = millis();
                     }                    
                 #endif
@@ -373,12 +385,14 @@ bool S88Interface::ProcessReportItems(const bool &ReportActiveAndInactivePins)
                 //Check if report is pending for this pin
                 if (s88PendingReport[i] & bitmask)
                 {
+                    bool pinStateActive = s88ReportValues[i] & bitmask;
+
                     //Report the active values that have changed if ReportActiveAndInactivePins = false
-                    if (ReportActiveAndInactivePins || (s88DataValues[i] & bitmask) != 0)
+                    if (ReportActiveAndInactivePins || pinStateActive)
                     {
                         bool succesResult = false;
                         //Found it, now report. Callback definition is checked at top of function
-                        __SD_CALLBACK_S88REPORT(bitindex + (i * 8), (s88DataValues[i] & bitmask) != 0, succesResult);
+                        __SD_CALLBACK_S88REPORT(bitindex + (i * 8), pinStateActive, succesResult);
                         if (succesResult)
                         {
                             //Remove bit from bits to report mask
@@ -401,6 +415,40 @@ bool S88Interface::ProcessReportItems(const bool &ReportActiveAndInactivePins)
     return false;
 }
 
+void S88Interface::UpdateReportValues()
+{
+    for (uint8_t arrayIndex = 0; arrayIndex < S88moduleCount; arrayIndex++)
+    {
+        //Check if the s88datavalues != report values
+        if (s88DataValues != s88ReportValues)     
+        {
+            //Different, check each bit
+            for (uint8_t bitindex = 0; bitindex < 8; bitindex++)
+            {
+                bool bitData = bitRead(s88DataValues[arrayIndex], bitindex);
+                bool bitCurrent = bitRead(s88ReportValues[arrayIndex], bitindex);
+
+                //Check if current bit is different
+                if (bitCurrent != bitData)                
+                {
+                    //Different, update report bit to match
+                    if (!bitData)
+                    {
+                        //Check if pending report, if so, do not clear occupation bit, wait until report has been completed
+                        bool bitReportPending = bitRead(s88PendingReport[arrayIndex], bitindex);
+                        if (!bitReportPending)
+                        {
+                            bitClear(s88ReportValues[arrayIndex], bitindex);
+                            //Set pending report bit
+                            bitSet(s88PendingReport[arrayIndex], bitindex);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #ifdef REQUIRES_I2C
 bool S88Interface::RefreshS88DataI2C()
 {
@@ -415,6 +463,7 @@ bool S88Interface::RefreshS88DataI2C()
                 newValues = Wire.read();
             }
             //Enable internall pull-up
+            //https://github.com/RobTillaart/PCF8574/blob/master/PCF8574.h
             Wire.beginTransmission(DeviceAddr);
             Wire.write(0xFF);
             Wire.endTransmission(DeviceAddr);
