@@ -54,7 +54,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "version.h"
 #include "BoardLeds.h"
 #include <avr/wdt.h>
-#include "LoconetExt.h"
+#include "LocoNetClassExt.hpp"
 
 #ifdef REQUIRES_I2C
     #include <Wire.h>
@@ -130,9 +130,6 @@ struct lByteBools
 };
 lByteBools bBools;
 
-unsigned long LoconetBusyLastMillis = 0;
-uint8_t LoconetBusyWaitTime = 0;
-
 void OnButtonGoStopPress(const bool &LongPress)
 {
     LN_STATUS ret;
@@ -161,39 +158,29 @@ void notifySensor(uint16_t Address, uint8_t State)
         //LR_SPRN(F("Rsens")); LR_SPRNL(Address);
         
         LastReportedSensorAddress = 0;
-        SetLoconetBusyWait();
-        LoconetBusyWaitTime = 2;
+        LocoNetClassExt::SetLoconetBusyWait(2);
     }
-    else
-    if (LastReportedSensorAddress != 0)
+    else if (LastReportedSensorAddress != 0)
     {
         bBools.bResend_Last_Loconet_Packet = true;
-        SetLoconetBusyWait();
+        LocoNetClassExt::SetLoconetBusyWait();
         //LR_SPRNL(F(".!M"));
     }
     else
     {
         //LR_SPRNL(F(".OD"));        
-        SetLoconetBusyWait();
+        LocoNetClassExt::SetLoconetBusyWait();
     }
 }
 
 LN_STATUS reportSensorState(uint16_t Address, uint8_t State)
 {
-    if (ProcessLoconetPackets())
-    {
-        return LN_STATUS::LN_CD_BACKOFF;
-    }
-    if (!LocoNetClassExt::uartStateIdle())
+    if (!LocoNetClassExt::CheckLoconetAvailable())
     {
         //LR_SPRNL(F("NOTREADY"));
         return LN_STATUS::LN_CD_BACKOFF;
     }    
     else if (LastReportedSensorAddress != 0 && LastReportedSensorAddress != Address)
-    {
-        return LN_STATUS::LN_CD_BACKOFF;
-    }
-    else if (LoconetBusyLastMillis != 0)
     {
         return LN_STATUS::LN_CD_BACKOFF;
     }
@@ -204,7 +191,7 @@ LN_STATUS reportSensorState(uint16_t Address, uint8_t State)
         //Encode State in first bit, needed in case of retransmit
         LastReportedSensorAddress = (Address & 0x7FFF) + (uint16_t(State) << 15);
         //Ensure to give other devices some room to talk
-        SetLoconetBusyWait();
+        LocoNetClassExt::SetLoconetBusyWait();
     }
     return result;
 }
@@ -260,7 +247,7 @@ bool ProcessLoconetPackets()
     {
         returnValue = true;
         //Be nice to other devices and give them bus time
-        SetLoconetBusyWait();
+        LocoNetClassExt::SetLoconetBusyWait();
 
         //Process LoconetPacket
         if (LocoNet.processSwitchSensorMessage(LnPacket))
@@ -280,7 +267,7 @@ bool ProcessLoconetPackets()
     }
 
     //Process pending SV data if needed
-    if (bBools.deferredProcessingNeeded && LoconetBusyLastMillis == 0)
+    if (bBools.deferredProcessingNeeded && LocoNetClassExt::CheckLoconetAvailable())
     {
         bBools.deferredProcessingNeeded = (sv.doDeferredProcessing() != SV_OK);
     }
@@ -633,16 +620,6 @@ void setup()
 
     GetConfiguredValues();
 
-    LocoNet.init(LOCONET_TX_PIN);
-    sv.init(VAL_LOCONET_MANUFACTURER, VAL_LOCONET_PRODUCTID, VAL_LOCONET_ARTNR, SOFTWARE_VERSION);
-   
-    #ifdef NATIVE_S88_ENABLED
-        S88_Native.SetOnS88ReportEvent(&OnReportS88);
-    #endif
-    #ifdef  LOCAL_S88_ENABLED
-        S88_Local.SetOnS88ReportEvent(&OnReportLocalS88);
-    #endif
-
     #if defined(REQUIRES_I2C)
         Wire.begin();
         Wire.setWireTimeout(5000, true);
@@ -666,6 +643,33 @@ void setup()
         pca9685I2C.init(PCA9685_I2C_ADDR_START);
     #endif
 
+    //Attach button press event to handler
+    ButtonStopGo.OnButtonPressEvent(&OnButtonGoStopPress);
+    #ifdef PROGRAM_BUTTON_ENABLED
+        ButtonProgram.OnButtonPressEvent(&OnButtonProgramPress);
+    #endif
+
+    BoardLeds::Init();
+    BoardLeds::SetSysLedON(25);
+
+    BoardLeds::SetLedStopGo();
+    delay(1000);
+    BoardLeds::SetLedStopGoOff();
+    delay(1000);
+    NVRAM::SetOnSVChanged(notifySVChange);
+
+	//Init Loconet
+    LocoNet.init(LOCONET_TX_PIN);
+    sv.init(VAL_LOCONET_MANUFACTURER, VAL_LOCONET_PRODUCTID, VAL_LOCONET_ARTNR, SOFTWARE_VERSION);
+
+    #ifdef NATIVE_S88_ENABLED
+        S88_Native.SetOnS88ReportEvent(&OnReportS88);
+    #endif
+
+    #ifdef  LOCAL_S88_ENABLED
+        S88_Local.SetOnS88ReportEvent(&OnReportLocalS88);
+    #endif
+
     #ifdef LOCAL_I2C_S88_ENABLED
         S88_I2C.SetOnS88ReportEvent(&OnReportI2CS88);
     #endif    
@@ -675,36 +679,8 @@ void setup()
         vlx.SetOnS88ReportEvent(&OnReportVL53LS88);
     #endif
 
-    //Attach button press event to handler
-    ButtonStopGo.OnButtonPressEvent(&OnButtonGoStopPress);
-    #ifdef PROGRAM_BUTTON_ENABLED
-        ButtonProgram.OnButtonPressEvent(&OnButtonProgramPress);
-    #endif
-       
-    BoardLeds::Init();
-    BoardLeds::SetSysLedON(25);
-
-    /*
-    if (!checkVersion())
-    {        
-        while (true)
-        {         
-            wdt_disable();
-            BoardLeds::SetLedGo();
-            delay(250);
-            BoardLeds::SetLedStop();
-            delay(250);
-        }
-    }*/
-
-    BoardLeds::SetLedStopGo();
-    delay(1000);
-    BoardLeds::SetLedStopGoOff();
-    delay(1000);
-    NVRAM::SetOnSVChanged(notifySVChange);
-
     wdt_reset();
-    wdt_enable(WDTO_2S);
+    wdt_enable(WDTO_250MS);
 }
 
 void SetRunningStatus(bool status)
@@ -767,21 +743,10 @@ void SetRunningStatus(bool status)
     }
 }
 
-void SetLoconetBusyWait()
-{
-    LoconetBusyLastMillis = millis();
-    LoconetBusyWaitTime = random(LOCONET_BUSY_WAIT_MS_MIN, LOCONET_BUSY_WAIT_MS_MAX);
-}
-
 void loop()
 {
     wdt_reset();
     ProcessLoconetPackets();
-    if (LoconetBusyLastMillis != 0 && (millis() - LoconetBusyLastMillis) > LoconetBusyWaitTime)
-    {
-        //Ensure to backoff until timer has expired. Clear LoconetBusyLastMillis once expired
-        LoconetBusyLastMillis = 0;
-    }
 
     if (bBools.bResend_Last_Loconet_Packet && LastReportedSensorAddress != 0)
     {

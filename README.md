@@ -1,5 +1,5 @@
-# LocoConnect
-LocoConnect controller board Firmware
+# LocoConnect for Loconet
+LocoConnect Loconet controller board Firmware
 
 ## Description:
 
@@ -162,7 +162,7 @@ Software: LocoConnect
 License: GPLv3
 Licensor: Roeland Kluit
 
-Copyright (C) 2024 Roeland Kluit - v0.6 Februari 2024 - All rights reserved -
+Copyright (C) 2026 Roeland Kluit - v0.7 November 2026 - All rights reserved -
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
